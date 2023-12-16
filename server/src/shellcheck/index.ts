@@ -7,7 +7,7 @@ import { TextDocument } from 'vscode-languageserver-textdocument'
 
 import { debounce } from '../util/async'
 import { logger } from '../util/logger'
-import { analyzeShebang } from '../util/shebang'
+import { getShebang, analyzeShebang } from '../util/shebang'
 import { CODE_TO_TAGS, LEVEL_TO_SEVERITY } from './config'
 import {
   ShellCheckComment,
@@ -25,7 +25,7 @@ type LinterOptions = {
 
 export type LintingResult = {
   diagnostics: LSP.Diagnostic[]
-  codeActions: Record<string, LSP.CodeAction | undefined>
+  codeActions: Record<string, LSP.CodeAction[]>
 }
 
 export class Linter {
@@ -105,7 +105,7 @@ export class Linter {
     // Clean up the debounced function
     delete this.uriToDebouncedExecuteLint[document.uri]
 
-    return mapShellCheckResult({ uri: document.uri, result })
+    return mapShellCheckResult({ document, uri: document.uri, result })
   }
 
   private async runShellCheck(
@@ -180,7 +180,15 @@ export class Linter {
   }
 }
 
-function mapShellCheckResult({ uri, result }: { uri: string; result: ShellCheckResult }) {
+function mapShellCheckResult({
+  document,
+  uri,
+  result,
+}: {
+  document: TextDocument
+  uri: string
+  result: ShellCheckResult
+}) {
   const diagnostics: LintingResult['diagnostics'] = []
   const codeActions: LintingResult['codeActions'] = {}
 
@@ -215,6 +223,8 @@ function mapShellCheckResult({ uri, result }: { uri: string; result: ShellCheckR
 
     diagnostics.push(diagnostic)
 
+    codeActions[id] = []
+
     const codeAction = CodeActionProvider.getCodeAction({
       comment,
       diagnostics: [diagnostic],
@@ -222,8 +232,24 @@ function mapShellCheckResult({ uri, result }: { uri: string; result: ShellCheckR
     })
 
     if (codeAction) {
-      codeActions[id] = codeAction
+      codeActions[id].push(codeAction)
     }
+
+    codeActions[id].push(
+      CodeActionProvider.getDisableLineCodeAction({
+        comment,
+        diagnostics: [diagnostic],
+        uri,
+      }),
+    )
+    codeActions[id].push(
+      CodeActionProvider.getDisableFileCodeAction({
+        document,
+        comment,
+        diagnostics: [diagnostic],
+        uri,
+      }),
+    )
   }
 
   return { diagnostics, codeActions }
@@ -237,6 +263,78 @@ function mapShellCheckResult({ uri, result }: { uri: string; result: ShellCheckR
  * Copyright (c) Timon Wong
  */
 class CodeActionProvider {
+  public static getDisableLineCodeAction({
+    comment,
+    diagnostics,
+    uri,
+  }: {
+    comment: ShellCheckComment
+    diagnostics: LSP.Diagnostic[]
+    uri: string
+  }): LSP.CodeAction {
+    const indentation = '' // TODO
+
+    // TODO: handle existing disable
+    return {
+      title: `Disable ShellCheck rule SC${comment.code} for this line`,
+      diagnostics,
+      edit: {
+        changes: {
+          [uri]: this.getTextEdits([
+            {
+              precedence: 15, // TODO: what is this?
+              line: comment.line,
+              endLine: comment.line,
+              column: 1,
+              endColumn: 1,
+              insertionPoint: 'beforeStart', // TODO: where is this used?
+              replacement: `${indentation}# shellcheck disable=${comment.code}\n`,
+            },
+          ]),
+        },
+      },
+      kind: LSP.CodeActionKind.QuickFix,
+    }
+  }
+
+  public static getDisableFileCodeAction({
+    document,
+    comment,
+    diagnostics,
+    uri,
+  }: {
+    document: TextDocument
+    comment: ShellCheckComment
+    diagnostics: LSP.Diagnostic[]
+    uri: string
+  }): LSP.CodeAction {
+    const documentText = document.getText()
+    const shebang = getShebang(documentText)
+    const firstNonShebangLine = shebang ? 2 : 1
+
+    // TODO: handle existing disable
+    return {
+      title: `Disable ShellCheck rule SC${comment.code} for the entire file`,
+      diagnostics,
+      edit: {
+        changes: {
+          [uri]: this.getTextEdits([
+            {
+              precedence: 15, // TODO: what is this?
+              line: firstNonShebangLine,
+              endLine: firstNonShebangLine,
+              column: 1,
+              endColumn: 1,
+              insertionPoint: 'beforeStart', // TODO: where is this used?
+              replacement: `# shellcheck disable=${comment.code}\n`,
+            },
+          ]),
+        },
+      },
+      kind: LSP.CodeActionKind.QuickFix,
+    }
+  }
+
   public static getCodeAction({
     comment,
     diagnostics,
